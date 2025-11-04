@@ -1,0 +1,153 @@
+name: Automated Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write  # Required to create tags and releases
+
+jobs:
+  release:
+    name: Create Release Tag
+    runs-on: ubuntu-latest
+    
+    # Only run if commit message indicates a release
+    if: |
+      contains(github.event.head_commit.message, 'feat:') ||
+      contains(github.event.head_commit.message, 'fix:') ||
+      contains(github.event.head_commit.message, 'BREAKING')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Get all history for version calculation
+      
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.23'
+      
+      - name: Run tests
+        run: |
+          go test ./...
+          go test -race ./...
+      
+      - name: Determine version bump
+        id: version
+        run: |
+          # Get latest production tag (excluding pre-release)
+          LATEST_TAG=$(git tag -l "v[0-9]*.[0-9]*.[0-9]" --sort=-v:refname | head -n1)
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG="v0.0.0"
+          fi
+          echo "Latest tag: $LATEST_TAG"
+          
+          # Parse version
+          VERSION=${LATEST_TAG#v}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          
+          # Determine bump type from commit message
+          COMMIT_MSG="${{ github.event.head_commit.message }}"
+          
+          if echo "$COMMIT_MSG" | grep -q "BREAKING CHANGE"; then
+            # Major version bump
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+            BUMP_TYPE="major"
+          elif echo "$COMMIT_MSG" | grep -qE "^feat(\(.*\))?:"; then
+            # Minor version bump
+            MINOR=$((MINOR + 1))
+            PATCH=0
+            BUMP_TYPE="minor"
+          elif echo "$COMMIT_MSG" | grep -qE "^fix(\(.*\))?:"; then
+            # Patch version bump
+            PATCH=$((PATCH + 1))
+            BUMP_TYPE="patch"
+          else
+            echo "No version bump needed"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "New version: $NEW_VERSION (${BUMP_TYPE} bump)"
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+          echo "previous_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+      
+      - name: Check if tag already exists
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          if git rev-parse "${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "Tag ${{ steps.version.outputs.version }} already exists"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+      
+      - name: Create and push tag
+        if: steps.version.outputs.skip != 'true'
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Create annotated tag
+          git tag -a "$NEW_VERSION" -m "Release $NEW_VERSION
+          
+          Automated release created by CI
+          Commit: ${{ github.sha }}
+          Author: ${{ github.actor }}
+          "
+          
+          # Push tag
+          git push origin "$NEW_VERSION"
+          
+          echo "✅ Created and pushed tag: $NEW_VERSION"
+      
+      - name: Generate changelog
+        if: steps.version.outputs.skip != 'true'
+        id: changelog
+        run: |
+          PREV_TAG="${{ steps.version.outputs.previous_tag }}"
+          NEW_TAG="${{ steps.version.outputs.version }}"
+          
+          # Generate changelog from commits
+          CHANGELOG=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          
+          # Save to file (handling multiline)
+          echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      
+      - name: Create GitHub Release
+        if: steps.version.outputs.skip != 'true'
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          release_name: Release ${{ steps.version.outputs.version }}
+          body: |
+            ## Release ${{ steps.version.outputs.version }}
+            
+            **Type**: ${{ steps.version.outputs.bump_type }} release
+            
+            ## Changes
+            
+            ${{ steps.changelog.outputs.CHANGELOG }}
+            
+            **Full Changelog**: https://github.com/${{ github.repository }}/compare/${{ steps.version.outputs.previous_tag }}...${{ steps.version.outputs.version }}
+            
+            ---
+            
+            ✅ This is a **production-ready** release created automatically by CI.
+            
+            All tests passed and code reviewed before merge to main.
+          draft: false
+          prerelease: false
+
