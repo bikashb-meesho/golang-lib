@@ -106,10 +106,15 @@ func (l *Logger) With(fields ...zap.Field) *Logger {
 	return &Logger{log: l.log.With(fields...)}
 }
 
+// contextKey is a custom type for context keys
+type contextKey string
+
+const requestIDKey contextKey = "request_id"
+
 // WithContext adds context fields to the logger
 func (l *Logger) WithContext(ctx context.Context) *Logger {
 	// Extract request ID or trace ID from context if available
-	if reqID, ok := ctx.Value("request_id").(string); ok {
+	if reqID, ok := ctx.Value(requestIDKey).(string); ok {
 		return l.With(zap.String("request_id", reqID))
 	}
 	return l

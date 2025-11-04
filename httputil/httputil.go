@@ -98,12 +98,17 @@ func Recover(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				WriteError(w, http.StatusInternalServerError, "internal_error", "Internal server error")
+				_ = WriteError(w, http.StatusInternalServerError, "internal_error", "Internal server error")
 			}
 		}()
 		next.ServeHTTP(w, r)
 	})
 }
+
+// contextKey is a custom type for context keys to avoid collisions
+type contextKey string
+
+const requestIDKey contextKey = "request_id"
 
 // RequestID is a middleware that adds a unique request ID to the context
 func RequestID(next http.Handler) http.Handler {
@@ -113,7 +118,7 @@ func RequestID(next http.Handler) http.Handler {
 			requestID = fmt.Sprintf("%d", time.Now().UnixNano())
 		}
 
-		ctx := context.WithValue(r.Context(), "request_id", requestID)
+		ctx := context.WithValue(r.Context(), requestIDKey, requestID)
 		w.Header().Set("X-Request-ID", requestID)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -137,7 +142,7 @@ func Timeout(duration time.Duration) func(http.Handler) http.Handler {
 			case <-done:
 				return
 			case <-ctx.Done():
-				WriteError(w, http.StatusRequestTimeout, "timeout", "Request timeout")
+				_ = WriteError(w, http.StatusRequestTimeout, "timeout", "Request timeout")
 			}
 		})
 	}
